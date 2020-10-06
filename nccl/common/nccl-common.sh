@@ -69,7 +69,7 @@ define_parameters() {
     instance_ami_type='c5n.18xlarge'
     # Instance type for running NCCL tests
     instance_test_type='p3dn.24xlarge'
-    create_instance_retries=10
+    create_instance_retries=24
     instance_check_retries=10
     ami_check_retries=20
     ssh_check_retries=40
@@ -146,63 +146,53 @@ delete_sg() {
 }
 
 create_instance() {
-
     INSTANCE_IDS=''
     SERVER_ERROR=(InsufficientInstanceCapacity RequestLimitExceeded ServiceUnavailable Unavailable Unsupported)
-    creation_attempts_count=0
-    error=1
     network_interface="[{\"DeviceIndex\":0,\"DeleteOnTermination\":true,\"InterfaceType\":\"efa\",\"Groups\":[\"$1\"]"
     addl_args=""
     echo "==> Creating instances"
-    while [ ${error} -ne 0 ] && [ ${creation_attempts_count} -lt ${create_instance_retries} ]; do
-        for subnet in ${subnet_ids[@]}; do
-            if [ ${ENABLE_PLACEMENT_GROUP} -eq 1 ]; then
-                addl_args="--placement GroupName="${PGS["${subnet}"]}
-            fi
-            error=1
-            set +e
-            INSTANCE_IDS=$(aws ec2 run-instances \
-                    --tag-specification "ResourceType=instance,Tags=[{Key=Workspace,Value="${WORKSPACE}"},{Key=Name,Value=Slave},{Key=Build_Number,Value="${BUILD_NUMBER}"}]" \
-                    --image-id $3 \
-                    --instance-type $4 \
-                    --enable-api-termination \
-                    --key-name ${slave_keypair} \
-                    --network-interface ${network_interface}",\"SubnetId\":\"${subnet}\"}]" \
-                    --count $2 \
-                    --query "Instances[*].InstanceId" \
-                    --output=text ${addl_args} 2>&1)
-            create_instance_exit_code=$?
-            echo "${INSTANCE_IDS}"
-            set -e
-            # If run-instances is successful break from both the loops, else
-            # find out whether the error was due to SERVER_ERROR or some other error
-            if [ $create_instance_exit_code -ne 0 ]; then
-                # If the error was due to SERVER_ERROR, set error=1 else for
-                # some other error set error=0
-                for code in ${SERVER_ERROR[@]}; do
-                    if [[ "${INSTANCE_IDS}" == *${code}* ]]; then
-                        error=1
-                        break
-                    else
-                        error=0
-                    fi
-                done
-            else
-                echo "==> Instances created: ${INSTANCE_IDS}"
-                break 2
-            fi
-            # If run-instances wasn't successful, and it was due to some other
-            # error, exit and fail the test.
-            if [ ${error} -eq 0 ]; then
-                exit ${create_instance_exit_code}
+    for subnet in ${subnet_ids[@]}; do
+        if [ ${ENABLE_PLACEMENT_GROUP} -eq 1 ]; then
+            addl_args="--placement GroupName="${PGS["${subnet}"]}
+        fi
+        set +e
+        INSTANCE_IDS=$(aws ec2 run-instances \
+                --tag-specification "ResourceType=instance,Tags=[{Key=Workspace,Value="${WORKSPACE}"},{Key=Name,Value=Slave},{Key=Build_Number,Value="${BUILD_NUMBER}"}]" \
+                --image-id $3 \
+                --instance-type $4 \
+                --enable-api-termination \
+                --key-name ${slave_keypair} \
+                --network-interface ${network_interface}",\"SubnetId\":\"${subnet}\"}]" \
+                --count $2 \
+                --query "Instances[*].InstanceId" \
+                --output=text ${addl_args} 2>&1)
+        create_instance_exit_code=$?
+        echo "${INSTANCE_IDS}"
+        set -e
+        if [ $create_instance_exit_code -eq 0 ]; then
+            echo "==> Instances created: ${INSTANCE_IDS}"
+            return 0
+        fi
+
+        # If the error code is in the SERVER_ERROR list continue to try other AZs.
+        for code in ${SERVER_ERROR[@]}; do
+            if [[ "${INSTANCE_IDS}" == *${code}* ]]; then
+                break
             fi
         done
-        sleep 2m
-        creation_attempts_count=$((creation_attempts_count+1))
+
+        # Otherwise, the error is fatal, exit and fail the test.
+        echo "==> Instance creation fatal error, exiting. ret: ${create_instance_exit_code}"
+        exit ${create_instance_exit_code}
     done
+
+    echo "==> create_instance failed for all AZs in ${AWS_DEFAULT_REGION} due to transient errors"
+    return 1
 }
 
 prepare_instance() {
+    local ret=0
+    INSTANCE_STATE="unavailable"
 
     for region in ${aws_regions[@]}; do
         # Set the default region
@@ -213,19 +203,15 @@ prepare_instance() {
         INSTANCES=()
         create_pg
         create_instance_attempts=0
-        INSTANCE_STATE="unavailable"
         while [ ${INSTANCE_STATE} != 'running' ] && [ ${create_instance_attempts} -lt ${create_instance_retries} ] ; do
             if [ $1 == 'ami_instance' ] ; then
                 create_instance ${SGId} 1 ${prep_ami} ${instance_ami_type}
+                ret=$?
             else
                 create_instance ${SGId} ${num_instances} ${AMIS["${AWS_DEFAULT_REGION}"]} ${instance_test_type}
+                ret=$?
             fi
-            if [ ${create_instance_exit_code} -ne 0 ]; then
-                echo "==> Changing the region"
-                delete_pg
-                # Start over with new region
-                continue 3
-            else
+            if [ ${ret} -eq 0 ]; then
                 INSTANCES=(${INSTANCE_IDS})
                 for INSTANCE_ID in ${INSTANCES[@]};do
                     test_instance_status $INSTANCE_ID
@@ -234,15 +220,19 @@ prepare_instance() {
                         break
                     fi
                 done
+                return 0
             fi
-                create_instance_attempts=$((create_instance_attempts+1))
+            sleep 5m
+            create_instance_attempts=$((create_instance_attempts+1))
         done
-            if [ ${INSTANCE_STATE} != 'running' ] ; then
-                echo "All attempts to create instance failed."
-                exit 1
-            fi
-        break
+        echo "==> Changing the region"
+        delete_pg
     done
+
+    if [ ${INSTANCE_STATE} != 'running' ] ; then
+        echo "All attempts to create instance failed, exiting."
+        exit 1
+    fi
 }
 
 ami_instance_preparation() {
