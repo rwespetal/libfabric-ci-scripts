@@ -34,7 +34,11 @@ efa_software_components_minimal()
     echo "curl ${CURL_OPT} -o efa-installer.tar.gz $EFA_INSTALLER_URL" >> ${tmp_script}
     echo "tar -xf efa-installer.tar.gz" >> ${tmp_script}
     echo "cd \${HOME}/aws-efa-installer" >> ${tmp_script}
-    echo "sudo ./efa_installer.sh -m -y" >> ${tmp_script}
+    if [ ${BUILD_GDR} -eq 1 ]; then
+        echo "sudo ./efa_installer.sh -m -y -g" >> ${tmp_script}
+    else
+        echo "sudo ./efa_installer.sh -m -y" >> ${tmp_script}
+    fi
 }
 
 multi_node_efa_minimal_script_builder()
@@ -42,6 +46,9 @@ multi_node_efa_minimal_script_builder()
     type=$1
     set_var
     ${label}_update
+    if [ ${BUILD_GDR} -eq 1 ]; then
+        install_nvidia_driver
+    fi
     efa_software_components_minimal
 
     # Ubuntu disallows non-child process ptrace by default, which is

@@ -298,7 +298,7 @@ install_nvidia_driver() {
         echo 'sudo yum install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r)' >> ${tmp_script}
     fi
 
-    echo "wget ${WGET_OPT} https://developer.download.nvidia.com/compute/cuda/11.0.3/local_installers/cuda_11.0.3_450.51.06_linux.run" >> ${tmp_script}
+    echo "curl -O ${CURL_OPT} https://developer.download.nvidia.com/compute/cuda/11.0.3/local_installers/cuda_11.0.3_450.51.06_linux.run" >> ${tmp_script}
     echo "chmod +x cuda_11.0.3_450.51.06_linux.run" >> ${tmp_script}
     echo "sudo sh cuda_11.0.3_450.51.06_linux.run --override --silent" >> ${tmp_script}
 }
