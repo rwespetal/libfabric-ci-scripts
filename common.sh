@@ -15,7 +15,7 @@ fi
 RUN_IMPI_TESTS=${RUN_IMPI_TESTS:-1}
 ENABLE_PLACEMENT_GROUP=${ENABLE_PLACEMENT_GROUP:-0}
 TEST_SKIP_KMOD=${TEST_SKIP_KMOD:-0}
-TEST_GDR=${TEST_GDR:-0}
+BUILD_GDR=${BUILD_GDR:-0}
 get_alinux_ami_id() {
     region=$1
     if [ "$ami_arch" = "x86_64" ]; then
@@ -177,7 +177,7 @@ create_instance()
     SERVER_ERROR=(InsufficientInstanceCapacity RequestLimitExceeded ServiceUnavailable Unavailable)
     create_instance_count=0
     error=1
-    if [ $ami_arch = "x86_64" ] && [ $TEST_GDR -eq 0 ]; then
+    if [ $ami_arch = "x86_64" ] && [ $BUILD_GDR -eq 0 ]; then
         case "${PROVIDER}" in
             efa)
                 instance_type=c5n.18xlarge
@@ -189,7 +189,7 @@ create_instance()
             *)
                 exit 1
         esac
-    elif [ $TEST_GDR -eq 1 ]; then
+    elif [ $BUILD_GDR -eq 1 ]; then
         instance_type=g4dn.metal
         network_interface="[{\"DeviceIndex\":0,\"DeleteOnTermination\":true,\"InterfaceType\":\"efa\",\"Groups\":[\"${slave_security_group}\"]"
     else
@@ -201,6 +201,11 @@ create_instance()
         echo "==> Creating placement group"
         create_pg || return 1
         addl_args="--placement GroupName=${PLACEMENT_GROUP}"
+    fi
+    # NVIDIA drivers are large, allocate more EBS space for them.
+    if [ $BUILD_GDR -eq 1 ]; then
+	dev_name=$(aws ec2 describe-images --image-id ${ami[0]} --query 'Images[*].RootDeviceName' --output text)
+        addl_args="${addl_args} --block-device-mapping=[{\"DeviceName\":\"${dev_name}\",\"Ebs\":{\"VolumeSize\":64}}]"
     fi
     echo "==> Creating instances"
     while [ ${error} -ne 0 ] && [ ${create_instance_count} -lt 30 ]; do
@@ -280,6 +285,24 @@ check_provider_os()
     fi
 }
 
+install_nvidia_driver() {
+    # The "install_deps" functions do install these dependencies, however,
+    # we need to run the NVIDIA install before the EFA installer. We want
+    # to keep whatever we install before the EFA installer to a minimum to
+    # try to match what a customer will do.
+    if [ ${label} == "ubuntu" ]; then
+        echo 'sudo apt-get update && sudo apt-get install -y gcc make' >> ${tmp_script}
+        echo 'sudo apt-get install -y linux-headers-$(uname -r)' >> ${tmp_script}
+    else
+        echo 'sudo yum install -y gcc make' >> ${tmp_script}
+        echo 'sudo yum install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r)' >> ${tmp_script}
+    fi
+
+    echo "wget ${WGET_OPT} https://developer.download.nvidia.com/compute/cuda/11.0.3/local_installers/cuda_11.0.3_450.51.06_linux.run" >> ${tmp_script}
+    echo "chmod +x cuda_11.0.3_450.51.06_linux.run" >> ${tmp_script}
+    echo "sudo sh cuda_11.0.3_450.51.06_linux.run --override --silent" >> ${tmp_script}
+}
+
 # Creates a script, the script includes installation commands for
 # different AMIs and appends libfabric script
 script_builder()
@@ -287,6 +310,9 @@ script_builder()
     type=$1
     set_var
     ${label}_update
+    if [ $BUILD_GDR -eq 1 ]; then
+        install_nvidia_driver
+    fi
     efa_software_components
 
     # The libfabric shm provider use CMA for communication. By default ubuntu
@@ -434,7 +460,7 @@ efa_software_components()
 EOF
     if [ $TEST_SKIP_KMOD -eq 1 ]; then
         echo "sudo ./efa_installer.sh -y -k" >> ${tmp_script}
-    elif [ $TEST_GDR -eq 1 ]; then
+    elif [ $BUILD_GDR -eq 1 ]; then
         echo "sudo ./efa_installer.sh -y -g" >> ${tmp_script}
     else
         echo "sudo ./efa_installer.sh -y" >> ${tmp_script}
