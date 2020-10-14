@@ -2,8 +2,8 @@
 
 execution_seq=1
 BUILD_CODE=0
-CURL_OPT="--retry 5"
-WGET_OPT="--tries=5"
+CURL_OPT="--retry 5 --silent --show-error"
+WGET_OPT="--tries=5 --no-verbose"
 output_dir=${output_dir:-$(mktemp -d -p $WORKSPACE)}
 tmp_script=${tmp_script:-$(mktemp -p $WORKSPACE)}
 # set default architecture of ami as x86_64
